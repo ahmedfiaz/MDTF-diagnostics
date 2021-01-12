@@ -3,19 +3,12 @@ Dynamics Laboratory (Princeton, NJ, USA).
 """
 import os
 import io
-import abc
-import collections
 import dataclasses
-import operator as op
-import re
 import shutil
-import subprocess
 import tempfile
-import typing
 from src import (util, core, datelabel, diagnostic, data_manager, 
     preprocessor, environment_manager, output_manager, cmip6)
 from sites.NOAA_GFDL import gfdl_util
-import src.conflict_resolution as choose
 
 import logging
 _log = logging.getLogger(__name__)
@@ -207,20 +200,25 @@ class GCPFetchMixin(data_manager.AbstractFetchMixin):
             local_paths.append(local_path)
         return local_paths
 
-class GFDL_CMIP6_GCP_FileDataSource(
-    data_manager.CMIP6ExperimentSelectionMixin,
+
+class GFDL_GCP_FileDataSourceBase(
     data_manager.OnTheFlyDirectoryHierarchyQueryMixin, 
     GCPFetchMixin, 
     data_manager.DataframeQueryDataSourceBase
 ):
-    _FileRegexClass = cmip6.CMIP6_DRSPath
-    _AttributesClass = util.abstract_attribute()
+    """Base class for DataSources that access data on GFDL's internal filesystems
+    using GCP, and which may be invoked via frepp.
+    """
     _DiagnosticClass = GfdlDiagnostic
     _PreprocessorClass = preprocessor.MDTFDataPreprocessor
 
+    _FileRegexClass = util.abstract_attribute()
+    _DirectoryRegex = util.abstract_attribute()
+    _AttributesClass = util.abstract_attribute()
+
     def __init__(self, case_dict):
         self.catalog = None
-        super(GFDL_CMIP6_GCP_FileDataSource, self).__init__(case_dict)
+        super(GFDL_GCP_FileDataSourceBase, self).__init__(case_dict)
 
         config = core.ConfigManager()
         self.fetch_method = 'auto'
@@ -245,22 +243,87 @@ class GFDL_UDA_CMIP6DataSourceAttributes(data_manager.CMIP6DataSourceAttributes)
         self.MODEL_DATA_ROOT = os.sep + os.path.join('uda', 'CMIP6')
         super(GFDL_UDA_CMIP6DataSourceAttributes, self).__post_init__(model, experiment)
 
-class Gfdludacmip6DataManager(GFDL_CMIP6_GCP_FileDataSource):
+class Gfdludacmip6DataManager(
+    data_manager.CMIP6ExperimentSelectionMixin, 
+    GFDL_GCP_FileDataSourceBase
+):
+    """DataSource for accessing CMIP6 data stored on spinning disk at /uda/CMIP6.
+    """
+    _FileRegexClass = cmip6.CMIP6_DRSPath
+    _DirectoryRegex = cmip6.drs_directory_regex
     _AttributesClass = GFDL_UDA_CMIP6DataSourceAttributes
+
+
+@util.mdtf_dataclass
+class GFDL_archive_CMIP6DataSourceAttributes(data_manager.CMIP6DataSourceAttributes):
+    def __post_init__(self, model=None, experiment=None):
+        self.MODEL_DATA_ROOT = os.sep + os.path.join('archive','pcmdi','repo','CMIP6')
+        super(GFDL_archive_CMIP6DataSourceAttributes, self).__post_init__(model, experiment)
+
+class Gfdlarchivecmip6DataManager(
+    data_manager.CMIP6ExperimentSelectionMixin, 
+    GFDL_GCP_FileDataSourceBase
+):
+    """DataSource for accessing more extensive set of CMIP6 data on DMF tape-backed
+    storage at /archive/pcmdi/repo/CMIP6.
+    """
+    _FileRegexClass = cmip6.CMIP6_DRSPath
+    _DirectoryRegex = cmip6.drs_directory_regex
+    _AttributesClass = GFDL_archive_CMIP6DataSourceAttributes
+
 
 @util.mdtf_dataclass
 class GFDL_data_CMIP6DataSourceAttributes(data_manager.CMIP6DataSourceAttributes):
     def __post_init__(self, model=None, experiment=None):
-        # Kris says /data_cmip6 used to stage pre-publication data, so shouldn't
-        # be used as a data source unless explicitly requested by user
         self.MODEL_DATA_ROOT = os.sep + os.path.join('data_cmip6', 'CMIP6')
         super(GFDL_data_CMIP6DataSourceAttributes, self).__post_init__(model, experiment)
 
-class Gfdldatacmip6DataManager(GFDL_CMIP6_GCP_FileDataSource):
+class Gfdldatacmip6DataManager(
+    data_manager.CMIP6ExperimentSelectionMixin, 
+    GFDL_GCP_FileDataSourceBase
+):
+    """DataSource for accessing pre-publication CMIP6 data on /data_cmip6.
+    """
+    _FileRegexClass = cmip6.CMIP6_DRSPath
+    _DirectoryRegex = cmip6.drs_directory_regex
     _AttributesClass = GFDL_data_CMIP6DataSourceAttributes
 
 # RegexPattern that matches any string (path) that doesn't end with ".nc".
-ignore_non_nc_regex = util.RegexPattern(r".*(?<!\.nc)")
+_ignore_non_nc_regex = util.RegexPattern(r".*(?<!\.nc)")
+# match files ending in .nc only if they aren't of the form .tile#.nc
+# (negative lookback) 
+_ignore_tiles_regex = util.RegexPattern(r".*\.tile\d\.nc$")
+# match any paths corresponding to time average data (/av/), since currently 
+# we only deal with timeseries data (/ts/)
+_ignore_time_avg_regex = util.RegexPattern(r"/?([a-zA-Z0-9_-]+)/av/\S*")
+# RegexPattern matching any of the above -- description of files that are OK
+# to silently ignore during /pp/ directory crawl
+pp_ignore_regex = util.ChainedRegexPattern(
+    _ignore_time_avg_regex, _ignore_tiles_regex, _ignore_non_nc_regex
+)
+
+# can't combine these with the path regexes (below) since static dir regex should
+# only be used with static files 
+_pp_dir_regex = util.RegexPattern(r"""
+        /?                      # maybe initial separator
+        (?P<component>[a-zA-Z0-9_-]+)/     # component name
+        ts/                     # timeseries;
+        (?P<frequency>\w+)/     # ts freq
+        (?P<chunk_freq>\w+)     # data chunk length
+    """
+)
+_pp_static_dir_regex = util.RegexPattern(r"""
+        /?                      # maybe initial separator
+        (?P<component>[a-zA-Z0-9_-]+)     # component name             
+    """,
+    defaults={
+        'frequency': datelabel.FXDateFrequency, 'chunk_freq': datelabel.FXDateFrequency
+    }
+)
+pp_dir_regex = util.ChainedRegexPattern(
+    # try the first regex, and if no match, try second
+    _pp_dir_regex, _pp_static_dir_regex
+)
 
 _pp_ts_regex = util.RegexPattern(r"""
         /?                      # maybe initial separator
@@ -290,7 +353,7 @@ pp_path_regex = util.ChainedRegexPattern(
     # try the first regex, and if no match, try second
     _pp_ts_regex, _pp_static_regex,
     input_field="remote_path",
-    match_error_filter=ignore_non_nc_regex
+    match_error_filter=pp_ignore_regex
 )
 @util.regex_dataclass(pp_path_regex)
 @util.mdtf_dataclass
@@ -307,17 +370,19 @@ class PPTimeseriesDataFile():
     date_range: datelabel.DateRange = dataclasses.field(init=False)
 
     def __post_init__(self, *args):
+        if isinstance(self.frequency, str):
+            self.frequency = datelabel.DateFrequency(self.frequency)
         if self.start_date == datelabel.FXDateMin \
             and self.end_date == datelabel.FXDateMax:
             # Assume we're dealing with static/fx-frequency data, so use special 
             # placeholder values
             self.date_range = datelabel.FXDateRange
-            if not self.frequency.is_static: # frequency inferred from table_id
+            if not self.frequency.is_static:
                 raise util.DataclassParseError(("Inconsistent filename parse: "
                     f"cannot determine if '{self.remote_path}' represents static data."))
         else:
             self.date_range = datelabel.DateRange(self.start_date, self.end_date)
-            if self.frequency.is_static: # frequency inferred from table_id
+            if self.frequency.is_static:
                 raise util.DataclassParseError(("Inconsistent filename parse: "
                     f"cannot determine if '{self.remote_path}' represents static data."))
 
@@ -333,7 +398,6 @@ class PPDataSourceAttributes(data_manager.DataSourceAttributesBase):
         """
         super(PPDataSourceAttributes, self).__post_init__()
         config = core.ConfigManager()
-        paths = core.PathManager()
         # set MODEL_DATA_ROOT
         if not self.MODEL_DATA_ROOT and config.CASE_ROOT_DIR:
             _log.debug(
@@ -347,15 +411,10 @@ class PPDataSourceAttributes(data_manager.DataSourceAttributesBase):
                 self.MODEL_DATA_ROOT)
             exit(1)
 
-class GfdlppDataManager(
-    data_manager.OnTheFlyDirectoryHierarchyQueryMixin, 
-    GCPFetchMixin, 
-    data_manager.DataframeQueryDataSourceBase
-):
+class GfdlppDataManager(GFDL_GCP_FileDataSourceBase):
     _FileRegexClass = PPTimeseriesDataFile
+    _DirectoryRegex = pp_dir_regex
     _AttributesClass = PPDataSourceAttributes
-    _DiagnosticClass = GfdlDiagnostic
-    _PreprocessorClass = preprocessor.MDTFDataPreprocessor
 
     # map "name" field in VarlistEntry's query_attrs() to "variable" field here
     _query_attrs_synonyms = {'name': 'variable'}
@@ -380,8 +439,6 @@ class GfdlppDataManager(
         if len(values) <= 1:
             # unique value, no need to filter
             return df
-        if msg is None:
-            msg = ""
         filter_val = func(values)
         _log.debug("Selected experiment attribute %s='%s' for %s (out of %s).", 
             col_name, filter_val, obj_name, values)
@@ -430,13 +487,6 @@ class GfdlppDataManager(
                 return _heuristic_tiebreaker_sub(str_list)
 
         df = self._filter_column(df, 'component', _heuristic_tiebreaker, obj.name)
-        return df
-
-        # prefer regridded data
-        if any(df['regrid'] == 'r'):
-            df = df[df['regrid'] == 'r']
-        # if multiple regriddings, choose the lowest-numbered one
-        df = self._filter_column_min(df, obj.name, 'grid_number')
         return df
 
     def resolve_var_expt(self, df, obj):

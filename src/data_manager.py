@@ -320,7 +320,8 @@ class DataSourceBase(AbstractDataSource, metaclass=util.MDTFABCMeta):
 
         if self.failed:
             # Originating exception will have been logged at a higher priority?
-            _log.debug("Request for CASENAME '%s' failed.", self.name)
+            _log.debug("Execution for CASENAME '%s' couldn't be completed successfully.", 
+                self.name)
             for p in self.iter_pods(active=True):
                 try:
                     raise util.GenericDataSourceError((f"Deactivating POD '{p.name}' "
@@ -774,7 +775,6 @@ class DataframeQueryDataSourceBase(DataSourceBase, metaclass=util.MDTFABCMeta):
         query_d.update(dataclasses.asdict(self.attrs))
         field_synonyms = getattr(self, '_query_attrs_synonyms', dict())
         query_d.update(var.query_attrs(field_synonyms))
-        d = util.NameSpace.fromDict(query_d) # set local var for df.query()
         clauses = [self._query_clause(k, k, v) for k,v in query_d.items()]
         query_str = '&'.join(c for c in clauses if c)
 
@@ -791,7 +791,10 @@ class DataframeQueryDataSourceBase(DataSourceBase, metaclass=util.MDTFABCMeta):
                 row_sel = catalog_df.apply((lambda r: v in r[col_name]), axis=1)
                 catalog_df = catalog_df[row_sel]
 
-        return catalog_df.query(query_str)
+        return catalog_df.query(
+            query_str, 
+            local_dict={'d': util.NameSpace.fromDict(query_d)}
+        )
 
     def _experiment_key(self, df=None, idx=None, cols=None):
         """Returns tuple of string-valued keys for grouping files by experiment:
@@ -1121,6 +1124,9 @@ class OnTheFlyDirectoryHierarchyQueryMixin(metaclass=util.MDTFABCMeta):
     CATALOG_DIR = util.abstract_attribute()
     # regex to use to generate catalog entries from relative paths:
     _FileRegexClass = util.abstract_attribute()
+    # optional regex to speed up directory crawl to skip non-matching directories
+    # without examining all files; default below is to not skip any directories
+    _DirectoryRegex = util.RegexPattern(".*")
     _asset_file_format = "netcdf"
 
     @property
@@ -1143,6 +1149,12 @@ class OnTheFlyDirectoryHierarchyQueryMixin(metaclass=util.MDTFABCMeta):
         # in case CATALOG_DIR is subset of MODEL_ROOT
         path_offset = len(os.path.join(self.attrs.MODEL_DATA_ROOT, ""))
         for root, _, files in os.walk(self.CATALOG_DIR):
+            try:
+                self._DirectoryRegex.match(root[path_offset:])
+            except util.RegexParseError:
+                continue
+            if not self._DirectoryRegex.is_matched:
+                continue
             for f in files:
                 if f.startswith('.'):
                     continue
@@ -1500,8 +1512,6 @@ class CMIP6ExperimentSelectionMixin():
         if len(values) <= 1:
             # unique value, no need to filter
             return df
-        if msg is None:
-            msg = ""
         filter_val = func(values)
         _log.debug("Selected experiment attribute %s='%s' for %s (out of %s).", 
             col_name, filter_val, obj_name, values)
@@ -1567,6 +1577,7 @@ class CMIP6LocalFileDataSource(CMIP6ExperimentSelectionMixin, LocalFileDataSourc
     stored on a local filesystem.
     """
     _FileRegexClass = cmip6.CMIP6_DRSPath
+    _DirectoryRegex = cmip6.drs_directory_regex
     _AttributesClass = CMIP6DataSourceAttributes
     _DiagnosticClass = diagnostic.Diagnostic
     _PreprocessorClass = preprocessor.MDTFDataPreprocessor

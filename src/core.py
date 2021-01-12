@@ -1,16 +1,12 @@
 """Common functions and classes used in multiple places in the MDTF code. 
 """
 import os
-import sys
-import io
 import collections
 import copy
 import dataclasses as dc
 import glob
-import re
 import shutil
 import signal
-import string
 import tempfile
 import traceback
 from src import util, cli, mdtf_info, data_model
@@ -20,7 +16,6 @@ _log = logging.getLogger(__name__)
 
 class MDTFFramework(object):
     def __init__(self, cli_obj):
-        # print('\tDEBUG: argv = {}'.format(sys.argv[1:]))
         self.code_root = cli_obj.code_root
         self.pod_list = []
         self.case_list = []
@@ -239,7 +234,8 @@ class MDTFFramework(object):
                 _log.info(f'Framework: request data for {case_name}')
                 case.request_data()
             else:
-                _log.info(f'Framework: {case_name} failed, skipping data request.')
+                _log.info((f"Framework: initialization for {case_name} failed, skipping "
+                    f"data request."))
 
             if not case.failed:
                 _log.info(f'Framework: run {case_name}')
@@ -248,7 +244,8 @@ class MDTFFramework(object):
                 run_mgr.run()
                 run_mgr.tear_down()
             else:
-                _log.info(f'Framework: {case_name} failed, skipping execution.')
+                _log.info((f"Framework: Data request for {case_name} failed, "
+                    f"skipping execution."))
 
             out_mgr = self.OutputManager(case)
             out_mgr.make_output()
@@ -646,13 +643,17 @@ class Fieldlist():
         could produce a TranslatedVarlistEntry for 'u500' (3D slice), depending 
         on naming convention.
         """
-        fl_entry = self.from_CF(var.standard_name, var.axes_set)
+        if var.use_exact_name:
+            fl_entry = var
+        else:
+            fl_entry = self.from_CF(var.standard_name, var.axes_set)
         
         new_dims = [self.translate_coord(dim) for dim in var.dims]
         new_scalars = [self.translate_coord(dim) for dim in var.scalar_coords]
         if len(new_scalars) > 1:
             raise NotImplementedError()
         elif len(new_scalars) == 1:
+            assert not var.use_exact_name
             # change translated name to request the slice instead of the full var
             # keep the scalar_coordinate value attribute on the translated var
             new_name = fl_entry.scalar_name(var.scalar_coords[0], new_scalars[0])
@@ -766,24 +767,24 @@ def print_summary(fmwk):
 
     d = {c.name: summary_info_tuple(c) for c in fmwk.cases}
     failed = any(len(tup[0]) > 0 for tup in d.values())
-    print('\n' + (80 * '-'))
+    _log.info('\n' + (80 * '-'))
     if failed:
-        print(f"Exiting with errors from {__file__}")
+        _log.info(f"Exiting with errors from {__file__}")
         for case_name, tup in d.items():
-            print(f"Summary for {case_name}:")
+            _log.info(f"Summary for {case_name}:")
             if tup[0][0] == 'dummy sentinel string':
-                print('\tAn error occurred in setup. No PODs were run.')
+                _log.info('\tAn error occurred in setup. No PODs were run.')
             else:
                 if tup[1]:
-                    print((f"\tThe following PODs exited cleanly: "
+                    _log.info((f"\tThe following PODs exited cleanly: "
                         f"{', '.join(tup[1])}"))
                 if tup[0]:
-                    print((f"\tThe following PODs raised errors: "
+                    _log.info((f"\tThe following PODs raised errors: "
                         f"{', '.join(tup[0])}"))
-            print(f"\tOutput written to {tup[2]}")
+            _log.info(f"\tOutput written to {tup[2]}")
     else:
-        print(f"Exiting normally from {__file__}")
+        _log.info(f"Exiting normally from {__file__}")
         for case_name, tup in d.items():
-            print(f"Summary for {case_name}:")
-            print(f"\tAll PODs exited cleanly.")
-            print(f"\tOutput written to {tup[2]}")
+            _log.info(f"Summary for {case_name}:")
+            _log.info(f"\tAll PODs exited cleanly.")
+            _log.info(f"\tOutput written to {tup[2]}")

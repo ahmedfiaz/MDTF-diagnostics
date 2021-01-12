@@ -10,6 +10,7 @@ import dataclasses
 import enum
 import importlib
 import itertools
+import json
 import operator
 import shlex
 import re
@@ -181,7 +182,7 @@ class PathAction(RecordDefaultsAction):
     call_on_defaults = True
 
     def __call__(self, parser, namespace, values, option_string=None):
-        config = CLIConfigManager()
+        # config = CLIConfigManager()
         path = util.from_iter(values)
         if path is None:
             path = ''
@@ -1027,6 +1028,8 @@ class MDTFTopLevelArgParser(MDTFArgParser):
                 # self.file_pod_list = d.pop('pods', [])
                 d = {canonical_arg_name(k): v for k,v in d.items()}
                 config.defaults[DefaultsFileTypes.USER].update(d)
+            except json.JSONDecodeError as exc:
+                sys.exit(f"ERROR: JSON syntax error in {path}:\n\t{exc}")
             except Exception:
                 _log.exception('Attempted to parse %s as JSONC; failed.', path)
                 raise ValueError()
@@ -1211,11 +1214,6 @@ class MDTFTopLevelSubcommandArgParser(MDTFTopLevelArgParser):
         the top-level parser, or the preparser), adding subparsers for all
         subcommands.
         """
-        def _defaultdict_update(d1, d2):
-            tmp_d = {k: (d1[k] + d2[k]) for k in set(d1) & set(d2)}
-            d1.update(d2)
-            d1.update(tmp_d)
-
         config = CLIConfigManager()
         add_help = isinstance(target_p, MDTFTopLevelArgParser)
         self.add_site_arg(target_p)

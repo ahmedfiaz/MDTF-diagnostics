@@ -4,8 +4,7 @@ once it's been download to local storage.
 import os
 import abc
 import dataclasses
-import itertools
-from src import util, core, data_model, diagnostic, xr_util
+from src import util, core, diagnostic, xr_util
 import cftime
 import xarray as xr
 
@@ -206,9 +205,12 @@ class ExtractLevelFunction(PreprocessorFunctionBase):
         # wraps method in data_model; makes a modified copy of translated var
         # restore name to that of 4D data (eg. 'u500' -> 'ua')
         new_ax_set = set(v.axes_set).add('Z')
-        new_tv_name = core.VariableTranslator().from_CF_name(
-            data_mgr.convention, v.standard_name, new_ax_set
-        )
+        if v.use_exact_name:
+            new_tv_name = v.name
+        else:
+            new_tv_name = core.VariableTranslator().from_CF_name(
+                data_mgr.convention, v.standard_name, new_ax_set
+            )
         new_tv = tv.remove_scalar(
             tv.scalar_coords[0].axis,
             name = new_tv_name
@@ -371,7 +373,11 @@ class MDTFPreprocessorBase(metaclass=util.MDTFABCMeta):
             attrs = getattr(obj, 'attrs', dict())
             for k,v in encoding.items():
                 if k in attrs:
-                    if attrs[k] != v and k.lower() != 'source':
+                    if isinstance(attrs[k], str) and isinstance(v, str):
+                        compare_ = (attrs[k].lower() != v.lower())
+                    else:
+                        compare_ = (attrs[k] != v)
+                    if compare_ and k.lower() != 'source':
                         _log.warning("Conflict in '%s' attribute of %s: %s != %s.",
                             k, name, v, attrs[k])
                     del attrs[k]   
